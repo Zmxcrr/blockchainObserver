@@ -1,0 +1,25 @@
+# Gradle
+.gradle/
+build/
+**/build/
+out/
+
+# IntelliJ IDEA
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# Editor backups
+*~
+*.bak
+
+# macOS
+.DS_Store
+
+# Log files
+*.log
+
+# Environment
+.env
+.env.local

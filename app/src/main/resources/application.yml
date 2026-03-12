@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: blockchain-backend
+
+  r2dbc:
+    url: ${R2DBC_URL:r2dbc:postgresql://localhost:5432/blockchain_db}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+
+  flyway:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/blockchain_db}
+    user: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+    locations: classpath:db/migration
+    enabled: true
+
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+    deserialization:
+      fail-on-unknown-properties: false
+
+server:
+  port: ${SERVER_PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics
+
+app:
+  jwt:
+    secret: ${JWT_SECRET:}
+    expiration-ms: ${JWT_EXPIRATION_MS:86400000}
+
+  tron:
+    grid-url: ${TRON_GRID_URL:https://api.trongrid.io}
+    api-key: ${TRON_API_KEY:}
+
+  etherscan:
+    base-url: ${ETHERSCAN_BASE_URL:https://api.etherscan.io/api}
+    api-key: ${ETHERSCAN_API_KEY:}
