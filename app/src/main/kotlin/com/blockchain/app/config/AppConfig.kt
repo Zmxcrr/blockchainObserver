@@ -37,7 +37,7 @@ class AppConfig {
                 conn.addHandlerLast(WriteTimeoutHandler(10))
             }
 
-        val clientBuilder = builder
+        val clientBuilder = builder.clone()
             .exchangeStrategies(exchangeStrategies)
             .baseUrl(tronBaseUrl)
             .clientConnector(ReactorClientHttpConnector(httpClient))

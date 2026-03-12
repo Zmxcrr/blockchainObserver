@@ -2,7 +2,6 @@ package com.blockchain.application.service
 
 import com.blockchain.application.dto.AddressResponse
 import com.blockchain.application.dto.BlockResponse
-import com.blockchain.application.dto.PagedResponse
 import com.blockchain.application.dto.TransactionResponse
 import com.blockchain.domain.entity.Block
 import com.blockchain.domain.entity.Transaction
@@ -13,6 +12,7 @@ import com.blockchain.domain.port.TransactionRepositoryPort
 import org.springframework.stereotype.Service
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
+import reactor.core.scheduler.Schedulers
 import java.util.UUID
 
 @Service
@@ -28,9 +28,10 @@ class BlockchainService(
     private fun recordHistoryAsync(userId: UUID?, query: String, network: Network, type: SearchType) {
         userId?.let {
             historyService.recordSearch(it, query, network, type)
+                .subscribeOn(Schedulers.boundedElastic())
                 .subscribe(
                     {},
-                    { error -> println("Failed to record history: ${error.message}") }
+                    {}
                 )
         }
     }
@@ -46,15 +47,16 @@ class BlockchainService(
 
         recordHistoryAsync(userId, address, network, SearchType.ADDRESS)
 
-        return transactionRepositoryPort.findByAddress(address, network, page, safeSize)
-            .switchIfEmpty(
-                gatewayFor(network).getTransactionsByAddress(address, page, safeSize)
-                    .collectList()
-                    .flatMapMany { fetched ->
-                        persistWithoutDuplicates(fetched, network)
-                            .thenMany(Flux.fromIterable(fetched))
-                    }
-            )
+        return gatewayFor(network).getTransactionsByAddress(address, page, safeSize)
+            .collectList()
+            .flatMapMany { fetched ->
+                persistWithoutDuplicates(fetched, network)
+                    .thenMany(Flux.fromIterable(fetched))
+            }
+            .onErrorResume { error ->
+                println("Failed to fetch from API, fallback to DB: ${error.message}")
+                transactionRepositoryPort.findByAddress(address, network, page, safeSize)
+            }
             .map { it.toResponse() }
     }
 
@@ -72,14 +74,16 @@ class BlockchainService(
 
         val balance = gateway.getAddressBalance(address)
 
-        val transactionsMono = transactionRepositoryPort.findByAddress(address, network, page, safeSize)
-            .switchIfEmpty(
-                gateway.getTransactionsByAddress(address, page, safeSize)
-                    .collectList()
-                    .flatMapMany { fetched ->
-                        persistWithoutDuplicates(fetched, network).thenMany(Flux.fromIterable(fetched))
-                    }
-            )
+        val transactionsMono = gatewayFor(network).getTransactionsByAddress(address, page, safeSize)
+            .collectList()
+            .flatMapMany { fetched ->
+                persistWithoutDuplicates(fetched, network)
+                    .thenMany(Flux.fromIterable(fetched))
+            }
+            .onErrorResume { error ->
+                println("Failed to fetch from API, fallback to DB: ${error.message}")
+                transactionRepositoryPort.findByAddress(address, network, page, safeSize)
+            }
             .map { it.toResponse() }
             .collectList()
 
