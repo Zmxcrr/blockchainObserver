@@ -9,10 +9,9 @@ import com.blockchain.domain.enum.Network
 import com.blockchain.domain.enum.SearchType
 import com.blockchain.domain.port.BlockchainGateway
 import com.blockchain.domain.port.TransactionRepositoryPort
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.*
 import org.springframework.stereotype.Service
-import reactor.core.publisher.Flux
-import reactor.core.publisher.Mono
-import reactor.core.scheduler.Schedulers
 import java.util.UUID
 
 @Service
@@ -21,18 +20,21 @@ class BlockchainService(
     private val transactionRepositoryPort: TransactionRepositoryPort,
     private val historyService: HistoryService
 ) {
+    private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     private fun gatewayFor(network: Network): BlockchainGateway =
         gateways.firstOrNull { it.getNetwork() == network }
             ?: throw IllegalArgumentException("No gateway registered for network: $network")
 
     private fun recordHistoryAsync(userId: UUID?, query: String, network: Network, type: SearchType) {
         userId?.let {
-            historyService.recordSearch(it, query, network, type)
-                .subscribeOn(Schedulers.boundedElastic())
-                .subscribe(
-                    {},
-                    {}
-                )
+            backgroundScope.launch {
+                try {
+                    historyService.recordSearch(it, query, network, type)
+                } catch (e: Exception) {
+                    println("Failed to record history: ${e.message}")
+                }
+            }
         }
     }
 
@@ -42,103 +44,122 @@ class BlockchainService(
         network: Network,
         page: Int,
         size: Int
-    ): Flux<TransactionResponse> {
+    ): Flow<TransactionResponse> = flow {
         val safeSize = size.coerceAtMost(100)
-
         recordHistoryAsync(userId, address, network, SearchType.ADDRESS)
 
-        return gatewayFor(network).getTransactionsByAddress(address, page, safeSize)
-            .collectList()
-            .flatMapMany { fetched ->
-                persistWithoutDuplicates(fetched, network)
-                    .thenMany(Flux.fromIterable(fetched))
+        val fetchedTransactions = try {
+            
+            gatewayFor(network).getTransactionsByAddress(address, page, safeSize).toList()
+        } catch (error: Exception) {
+            println("Failed to fetch from API, fallback to DB: ${error.message}")
+            null
+        }
+
+        if (fetchedTransactions != null) {
+            persistWithoutDuplicates(fetchedTransactions, network)
+            
+            for (tx in fetchedTransactions) {
+                emit(tx.toResponse())
             }
-            .onErrorResume { error ->
-                println("Failed to fetch from API, fallback to DB: ${error.message}")
-                transactionRepositoryPort.findByAddress(address, network, page, safeSize)
-            }
-            .map { it.toResponse() }
+        } else {
+            
+            
+            val dbFlow = transactionRepositoryPort.findByAddress(address, network, page, safeSize)
+                .map { it.toResponse() } 
+            emitAll(dbFlow)
+        }
     }
 
-    fun getAddress(
+    suspend fun getAddress(
         userId: UUID?,
         address: String,
         network: Network,
         page: Int,
         size: Int
-    ): Mono<AddressResponse> {
+    ): AddressResponse = coroutineScope {
         val gateway = gatewayFor(network)
         val safeSize = size.coerceAtMost(100)
 
         recordHistoryAsync(userId, address, network, SearchType.ADDRESS)
 
-        val balance = gateway.getAddressBalance(address)
+        
+        val balanceDeferred = async { gateway.getAddressBalance(address) }
 
-        val transactionsMono = gatewayFor(network).getTransactionsByAddress(address, page, safeSize)
-            .collectList()
-            .flatMapMany { fetched ->
+        val transactionsDeferred = async {
+            try {
+                val fetched = gateway.getTransactionsByAddress(address, page, safeSize).toList()
                 persistWithoutDuplicates(fetched, network)
-                    .thenMany(Flux.fromIterable(fetched))
-            }
-            .onErrorResume { error ->
+                fetched
+            } catch (error: Exception) {
                 println("Failed to fetch from API, fallback to DB: ${error.message}")
-                transactionRepositoryPort.findByAddress(address, network, page, safeSize)
+                transactionRepositoryPort.findByAddress(address, network, page, safeSize).toList()
             }
-            .map { it.toResponse() }
-            .collectList()
-
-        return Mono.zip(balance, transactionsMono).map { tuple ->
-            AddressResponse(
-                address = address,
-                network = network,
-                balance = tuple.t1.toPlainString(),
-                currency = if (network == Network.TRON) "TRX" else "ETH",
-                transactionCount = tuple.t2.size,
-                transactions = tuple.t2
-            )
         }
+
+        
+        val balance = balanceDeferred.await()
+        val transactions = transactionsDeferred.await()
+
+        
+        
+        val transactionResponses = transactions.map { it.toResponse() }
+
+        AddressResponse(
+            address = address,
+            network = network,
+            
+            balance = balance.toPlainString(),
+            currency = if (network == Network.TRON) "TRX" else "ETH",
+            transactionCount = transactionResponses.size, 
+            transactions = transactionResponses
+        )
     }
 
-    fun getTransactionByHash(hash: String, network: Network, userId: UUID? = null): Mono<TransactionResponse> {
-
+    suspend fun getTransactionByHash(hash: String, network: Network, userId: UUID? = null): TransactionResponse {
         recordHistoryAsync(userId, hash, network, SearchType.TX)
 
-        return transactionRepositoryPort.findByHash(hash, network)
-            .switchIfEmpty(
-                gatewayFor(network).getTransactionByHash(hash)
-                    .switchIfEmpty(Mono.error(NoSuchElementException("Transaction not found: $hash")))
-                    .flatMap { tx -> transactionRepositoryPort.save(tx) }
-            )
-            .map { it.toResponse() }
+        var tx = transactionRepositoryPort.findByHash(hash, network)
+
+        if (tx == null) {
+            tx = gatewayFor(network).getTransactionByHash(hash)
+                ?: throw NoSuchElementException("Transaction not found: $hash")
+
+            transactionRepositoryPort.save(tx)
+        }
+
+        return tx.toResponse() 
     }
 
-    fun getBlock(numberOrHash: String, network: Network, userId: UUID? = null): Mono<BlockResponse> {
-
+    suspend fun getBlock(numberOrHash: String, network: Network, userId: UUID? = null): BlockResponse {
         recordHistoryAsync(userId, numberOrHash, network, SearchType.BLOCK)
 
-        return gatewayFor(network).getBlock(numberOrHash)
-            .switchIfEmpty(Mono.error(NoSuchElementException("Block not found: $numberOrHash")))
-            .map { it.toResponse() }
+        val block = gatewayFor(network).getBlock(numberOrHash)
+            ?: throw NoSuchElementException("Block not found: $numberOrHash")
+
+        return block.toResponse() 
     }
 
-    fun getLatestBlock(network: Network, userId: UUID? = null): Mono<BlockResponse> {
-
+    suspend fun getLatestBlock(network: Network, userId: UUID? = null): BlockResponse {
         recordHistoryAsync(userId, "latest", network, SearchType.BLOCK)
 
-        return gatewayFor(network).getLatestBlock()
-            .switchIfEmpty(Mono.error(NoSuchElementException("No latest block available")))
-            .map { it.toResponse() }
+        val block = gatewayFor(network).getLatestBlock()
+            ?: throw NoSuchElementException("No latest block available")
+
+        return block.toResponse()
     }
 
-    private fun persistWithoutDuplicates(fetched: List<Transaction>, network: Network): Mono<Void> {
-        if (fetched.isEmpty()) return Mono.empty()
-        return transactionRepositoryPort.findExistingHashes(
+    private suspend fun persistWithoutDuplicates(fetched: List<Transaction>, network: Network) {
+        if (fetched.isEmpty()) return
+
+        val existingHashes = transactionRepositoryPort.findExistingHashes(
             hashes = fetched.map { it.hash }.distinct(),
             network = network
-        ).flatMap { existing ->
-            val toSave = fetched.filterNot { it.hash in existing }
-            if (toSave.isNotEmpty()) transactionRepositoryPort.saveAllIgnoreConflicts(toSave)
-            else Mono.empty()
+        )
+
+        val toSave = fetched.filterNot { it.hash in existingHashes }
+        if (toSave.isNotEmpty()) {
+            transactionRepositoryPort.saveAllIgnoreConflicts(toSave)
         }
     }
 

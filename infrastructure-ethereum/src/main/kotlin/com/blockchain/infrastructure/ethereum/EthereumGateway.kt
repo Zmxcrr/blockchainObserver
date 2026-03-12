@@ -8,14 +8,16 @@ import com.blockchain.domain.port.BlockchainGateway
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.JsonNode
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Component
 import org.springframework.web.reactive.function.client.WebClient
-import org.springframework.web.reactive.function.client.bodyToMono
-import org.springframework.web.util.UriComponentsBuilder
-import reactor.core.publisher.Flux
-import reactor.core.publisher.Mono
+import org.springframework.web.reactive.function.client.awaitBody
+import org.springframework.web.reactive.function.client.awaitBodyOrNull
 import java.math.BigDecimal
 import java.math.BigInteger
 import java.time.Instant
@@ -28,194 +30,213 @@ class EthereumGateway(
 
     override fun getNetwork(): Network = Network.ETHEREUM
 
-    override fun getAddressBalance(address: String): Mono<BigDecimal> {
-        return webClient.get()
-            .uri { builder ->
-                builder.queryParam("module", "account")
-                    .queryParam("action", "balance")
-                    .queryParam("address", address)
-                    .queryParam("tag", "latest")
-                    .queryParam("apikey", apiKey)
-                    .build()
-            }
-            .retrieve()
-            .bodyToMono<JsonNode>()
-            .mapNotNull { root ->
-                val result = root.path("result")
-                if (!result.isTextual) return@mapNotNull BigDecimal.ZERO
-                val wei = result.asText().toBigIntegerOrNull() ?: BigInteger.ZERO
-                wei.toBigDecimal().divide(BigDecimal.TEN.pow(18))
-            }
-            .onErrorReturn(BigDecimal.ZERO)
-    }
-
-    override fun getTransactionsByAddress(address: String, page: Int, size: Int): Flux<Transaction> {
-        val etherscanPage = page + 1
-        return webClient.get()
-            .uri { builder ->
-                builder.queryParam("module", "account")
-                    .queryParam("action", "txlist")
-                    .queryParam("address", address)
-                    .queryParam("page", etherscanPage)
-                    .queryParam("offset", size)
-                    .queryParam("sort", "desc")
-                    .queryParam("apikey", apiKey)
-                    .build()
-            }
-            .retrieve()
-            .bodyToMono<JsonNode>()
-            .flatMapIterable { root ->
-                val status = root.path("status").asText("")
-                val message = root.path("message").asText("")
-                val resultNode = root.path("result")
-                if (status == "0" && message.equals("No transactions found", ignoreCase = true)) {
-                    return@flatMapIterable emptyList()
-                }
-                if (!resultNode.isArray) return@flatMapIterable emptyList()
-                resultNode.mapNotNull { node ->
-                    runCatching {
-                        val tx = parseEtherscanTxNode(node)
-                        tx.toDomain()
-                    }.getOrNull()
-                }
-            }
-            .onErrorResume { Flux.empty() }
-    }
-
-    override fun getTransactionByHash(hash: String): Mono<Transaction> {
-        val txMono = webClient.get()
-            .uri { b ->
-                b.queryParam("module", "proxy")
-                    .queryParam("action", "eth_getTransactionByHash")
-                    .queryParam("txhash", hash)
-                    .queryParam("apikey", apiKey)
-                    .build()
-            }
-            .retrieve()
-            .bodyToMono<EtherscanProxyTxResponse>()
-
-        val receiptMono = webClient.get()
-            .uri { b ->
-                b.queryParam("module", "proxy")
-                    .queryParam("action", "eth_getTransactionReceipt")
-                    .queryParam("txhash", hash)
-                    .queryParam("apikey", apiKey)
-                    .build()
-            }
-            .retrieve()
-            .bodyToMono<EtherscanProxyReceiptResponse>()
-            .onErrorResume { Mono.empty() }
-
-        return txMono.flatMap { txResp ->
-            val tx = txResp.result ?: return@flatMap Mono.empty()
-            val blockNumberHex = tx.blockNumber ?: "0x0"
-            val blockMono = webClient.get()
-                .uri { b ->
-                    b.queryParam("module", "proxy")
-                        .queryParam("action", "eth_getBlockByNumber")
-                        .queryParam("tag", blockNumberHex)
-                        .queryParam("boolean", "false")
+    override suspend fun getAddressBalance(address: String): BigDecimal {
+        return try {
+            val root = webClient.get()
+                .uri { builder ->
+                    builder.queryParam("module", "account")
+                        .queryParam("action", "balance")
+                        .queryParam("address", address)
+                        .queryParam("tag", "latest")
                         .queryParam("apikey", apiKey)
                         .build()
                 }
                 .retrieve()
-                .bodyToMono<EtherscanProxyBlockResponse>()
-                .onErrorResume { Mono.empty() }
+                .awaitBody<JsonNode>()
 
-            Mono.zip(receiptMono.defaultIfEmpty(EtherscanProxyReceiptResponse()), blockMono.defaultIfEmpty(EtherscanProxyBlockResponse()))
-                .map { tuple ->
-                    val receipt = tuple.t1.result
-                    val block = tuple.t2.result
-                    val valueWei = hexToBigInt(tx.value)
-                    val gasPriceWei = hexToBigInt(tx.gasPrice)
-                    val gasUsedWei = hexToBigInt(receipt?.gasUsed)
-                    val feeWei = gasPriceWei.multiply(gasUsedWei)
-                    val status = when (receipt?.status?.lowercase()) {
-                        "0x1" -> TransactionStatus.SUCCESS
-                        "0x0" -> TransactionStatus.FAILED
-                        else -> TransactionStatus.PENDING
-                    }
-                    Transaction(
-                        hash = tx.hash ?: hash,
-                        network = Network.ETHEREUM,
-                        fromAddress = tx.from ?: "",
-                        toAddress = tx.to,
-                        amount = valueWei.toBigDecimal().divide(BigDecimal.TEN.pow(18)),
-                        fee = feeWei.toBigDecimal().divide(BigDecimal.TEN.pow(18)),
-                        blockNumber = hexToLong(tx.blockNumber),
-                        blockHash = tx.blockHash,
-                        timestamp = Instant.ofEpochSecond(hexToLong(block?.timestamp)),
-                        status = status,
-                        contractAddress = receipt?.contractAddress
-                    )
-                }
-        }.onErrorResume { Mono.empty() }
-    }
+            val result = root.path("result")
+            if (!result.isTextual) return BigDecimal.ZERO
 
-    override fun getBlock(numberOrHash: String): Mono<Block> {
-        val isHash = numberOrHash.startsWith("0x") && numberOrHash.length > 10
-        return if (isHash) {
-            webClient.get()
-                .uri { b ->
-                    b.queryParam("module", "proxy")
-                        .queryParam("action", "eth_getBlockByHash")
-                        .queryParam("tag", numberOrHash)
-                        .queryParam("boolean", "true")
-                        .queryParam("apikey", apiKey)
-                        .build()
-                }
-                .retrieve()
-                .bodyToMono<EtherscanProxyBlockResponse>()
-                .filter { it.result != null }
-                .map { it.result!!.toDomain() }
-                .onErrorResume { Mono.empty() }
-        } else {
-            val blockNum = numberOrHash.toLongOrNull() ?: return Mono.empty()
-            val hex = "0x${blockNum.toString(16)}"
-            webClient.get()
-                .uri { b ->
-                    b.queryParam("module", "proxy")
-                        .queryParam("action", "eth_getBlockByNumber")
-                        .queryParam("tag", hex)
-                        .queryParam("boolean", "true")
-                        .queryParam("apikey", apiKey)
-                        .build()
-                }
-                .retrieve()
-                .bodyToMono<EtherscanProxyBlockResponse>()
-                .filter { it.result != null }
-                .map { it.result!!.toDomain() }
-                .onErrorResume { Mono.empty() }
+            val wei = result.asText().toBigIntegerOrNull() ?: BigInteger.ZERO
+            wei.toBigDecimal().divide(BigDecimal.TEN.pow(18))
+        } catch (e: Exception) {
+            BigDecimal.ZERO
         }
     }
 
-    override fun getLatestBlock(): Mono<Block> {
-        return webClient.get()
-            .uri { b ->
-                b.queryParam("module", "proxy")
-                    .queryParam("action", "eth_blockNumber")
-                    .queryParam("apikey", apiKey)
-                    .build()
+    override fun getTransactionsByAddress(address: String, page: Int, size: Int): Flow<Transaction> = flow {
+        val etherscanPage = page + 1
+        try {
+            val root = webClient.get()
+                .uri { builder ->
+                    builder.queryParam("module", "account")
+                        .queryParam("action", "txlist")
+                        .queryParam("address", address)
+                        .queryParam("page", etherscanPage)
+                        .queryParam("offset", size)
+                        .queryParam("sort", "desc")
+                        .queryParam("apikey", apiKey)
+                        .build()
+                }
+                .retrieve()
+                .awaitBody<JsonNode>()
+
+            val status = root.path("status").asText("")
+            val message = root.path("message").asText("")
+            val resultNode = root.path("result")
+
+            if (status == "0" && message.equals("No transactions found", ignoreCase = true)) {
+                return@flow
             }
-            .retrieve()
-            .bodyToMono<EtherscanProxyHexResult>()
-            .flatMap { latestNumResp ->
-                val latestHex = latestNumResp.result ?: return@flatMap Mono.empty()
+            if (!resultNode.isArray) return@flow
+
+            resultNode.forEach { node ->
+                runCatching {
+                    val tx = parseEtherscanTxNode(node)
+                    emit(tx.toDomain())
+                }
+            }
+        } catch (e: Exception) {
+        }
+    }
+
+    override suspend fun getTransactionByHash(hash: String): Transaction? = coroutineScope {
+        try {
+            val txResp = webClient.get()
+                .uri { b ->
+                    b.queryParam("module", "proxy")
+                        .queryParam("action", "eth_getTransactionByHash")
+                        .queryParam("txhash", hash)
+                        .queryParam("apikey", apiKey)
+                        .build()
+                }
+                .retrieve()
+                .awaitBodyOrNull<EtherscanProxyTxResponse>()
+
+            val tx = txResp?.result ?: return@coroutineScope null
+
+            val blockNumberHex = tx.blockNumber ?: "0x0"
+
+            val receiptDeferred = async {
+                try {
+                    webClient.get()
+                        .uri { b ->
+                            b.queryParam("module", "proxy")
+                                .queryParam("action", "eth_getTransactionReceipt")
+                                .queryParam("txhash", hash)
+                                .queryParam("apikey", apiKey)
+                                .build()
+                        }
+                        .retrieve()
+                        .awaitBodyOrNull<EtherscanProxyReceiptResponse>()
+                } catch (e: Exception) { null }
+            }
+
+            val blockDeferred = async {
+                try {
+                    webClient.get()
+                        .uri { b ->
+                            b.queryParam("module", "proxy")
+                                .queryParam("action", "eth_getBlockByNumber")
+                                .queryParam("tag", blockNumberHex)
+                                .queryParam("boolean", "false")
+                                .queryParam("apikey", apiKey)
+                                .build()
+                        }
+                        .retrieve()
+                        .awaitBodyOrNull<EtherscanProxyBlockResponse>()
+                } catch (e: Exception) { null }
+            }
+
+            val receipt = receiptDeferred.await()?.result
+            val block = blockDeferred.await()?.result
+
+            val valueWei = hexToBigInt(tx.value)
+            val gasPriceWei = hexToBigInt(tx.gasPrice)
+            val gasUsedWei = hexToBigInt(receipt?.gasUsed)
+            val feeWei = gasPriceWei.multiply(gasUsedWei)
+            val status = when (receipt?.status?.lowercase()) {
+                "0x1" -> TransactionStatus.SUCCESS
+                "0x0" -> TransactionStatus.FAILED
+                else -> TransactionStatus.PENDING
+            }
+
+            Transaction(
+                hash = tx.hash ?: hash,
+                network = Network.ETHEREUM,
+                fromAddress = tx.from ?: "",
+                toAddress = tx.to,
+                amount = valueWei.toBigDecimal().divide(BigDecimal.TEN.pow(18)),
+                fee = feeWei.toBigDecimal().divide(BigDecimal.TEN.pow(18)),
+                blockNumber = hexToLong(tx.blockNumber),
+                blockHash = tx.blockHash,
+                timestamp = Instant.ofEpochSecond(hexToLong(block?.timestamp)),
+                status = status,
+                contractAddress = receipt?.contractAddress
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    override suspend fun getBlock(numberOrHash: String): Block? {
+        return try {
+            val isHash = numberOrHash.startsWith("0x") && numberOrHash.length > 10
+
+            val response = if (isHash) {
                 webClient.get()
                     .uri { b ->
                         b.queryParam("module", "proxy")
-                            .queryParam("action", "eth_getBlockByNumber")
-                            .queryParam("tag", latestHex)
+                            .queryParam("action", "eth_getBlockByHash")
+                            .queryParam("tag", numberOrHash)
                             .queryParam("boolean", "true")
                             .queryParam("apikey", apiKey)
                             .build()
                     }
                     .retrieve()
-                    .bodyToMono<EtherscanProxyBlockResponse>()
-                    .filter { it.result != null }
-                    .map { it.result!!.toDomain() }
+                    .awaitBodyOrNull<EtherscanProxyBlockResponse>()
+            } else {
+                val blockNum = numberOrHash.toLongOrNull() ?: return null
+                val hex = "0x${blockNum.toString(16)}"
+                webClient.get()
+                    .uri { b ->
+                        b.queryParam("module", "proxy")
+                            .queryParam("action", "eth_getBlockByNumber")
+                            .queryParam("tag", hex)
+                            .queryParam("boolean", "true")
+                            .queryParam("apikey", apiKey)
+                            .build()
+                    }
+                    .retrieve()
+                    .awaitBodyOrNull<EtherscanProxyBlockResponse>()
             }
-            .onErrorResume { Mono.empty() }
+
+            response?.result?.toDomain()
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    override suspend fun getLatestBlock(): Block? {
+        return try {
+            val latestNumResp = webClient.get()
+                .uri { b ->
+                    b.queryParam("module", "proxy")
+                        .queryParam("action", "eth_blockNumber")
+                        .queryParam("apikey", apiKey)
+                        .build()
+                }
+                .retrieve()
+                .awaitBodyOrNull<EtherscanProxyHexResult>()
+
+            val latestHex = latestNumResp?.result ?: return null
+
+            val blockResp = webClient.get()
+                .uri { b ->
+                    b.queryParam("module", "proxy")
+                        .queryParam("action", "eth_getBlockByNumber")
+                        .queryParam("tag", latestHex)
+                        .queryParam("boolean", "true")
+                        .queryParam("apikey", apiKey)
+                        .build()
+                }
+                .retrieve()
+                .awaitBodyOrNull<EtherscanProxyBlockResponse>()
+
+            blockResp?.result?.toDomain()
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private fun parseEtherscanTxNode(node: com.fasterxml.jackson.databind.JsonNode): EtherscanTxDto {

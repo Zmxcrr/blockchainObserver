@@ -7,12 +7,14 @@ import com.blockchain.domain.enum.Network
 import com.blockchain.domain.port.BlockchainGateway
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.emptyFlow
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.stereotype.Component
 import org.springframework.web.reactive.function.client.WebClient
-import org.springframework.web.reactive.function.client.bodyToMono
-import reactor.core.publisher.Flux
-import reactor.core.publisher.Mono
+import org.springframework.web.reactive.function.client.awaitBody
+import org.springframework.web.reactive.function.client.awaitBodyOrNull
 import java.math.BigDecimal
 import java.time.Instant
 
@@ -23,67 +25,85 @@ class TronGateway(
 
     override fun getNetwork(): Network = Network.TRON
 
-    override fun getTransactionsByAddress(address: String, page: Int, size: Int): Flux<Transaction> {
-        return webClient.get()
-            .uri("/v1/accounts/$address/transactions?limit=$size&start=${page * size}")
-            .retrieve()
-            .bodyToMono<TronTransactionListResponse>()
-            .flatMapIterable { it.data.map { tx -> tx.toDomain() } }
-            .onErrorResume { Flux.empty() }
-    }
-
-    override fun getAddressBalance(address: String): Mono<BigDecimal> {
-        return webClient.get()
-            .uri("/v1/accounts/$address")
-            .retrieve()
-            .bodyToMono<TronAccountResponse>()
-            .map { response ->
-                val sun = response.data.firstOrNull()?.balance ?: 0L
-                sun.toBigDecimal().divide(BigDecimal("1000000"))
-            }
-            .onErrorReturn(BigDecimal.ZERO)
-    }
-
-    override fun getTransactionByHash(hash: String): Mono<Transaction> {
-        return webClient.post()
-            .uri("/wallet/gettransactionbyid")
-            .bodyValue(mapOf("value" to hash))
-            .retrieve()
-            .bodyToMono<TronTransactionResponse>()
-            .filter { it.txId.isNotBlank() }
-            .map { it.toDomain() }
-            .onErrorResume { Mono.empty() }
-    }
-
-    override fun getBlock(numberOrHash: String): Mono<Block> {
-        val num = numberOrHash.toLongOrNull()
-        return if (num != null) {
-            webClient.post()
-                .uri("/wallet/getblockbynum")
-                .bodyValue(mapOf("num" to num, "visible" to true))
+    override fun getTransactionsByAddress(address: String, page: Int, size: Int): Flow<Transaction> = flow {
+        try {
+            val response = webClient.get()
+                .uri("/v1/accounts/$address/transactions?limit=$size&start=${page * size}")
                 .retrieve()
-                .bodyToMono<TronBlockResponse>()
-                .filter { it.block_header != null || !it.blockId.isNullOrBlank() }
-                .map { it.toDomain(hashFallback = numberOrHash) }
-        } else {
-            webClient.post()
-                .uri("/wallet/getblockbyid")
-                .bodyValue(mapOf("value" to numberOrHash, "visible" to true))
-                .retrieve()
-                .bodyToMono<TronBlockResponse>()
-                .filter { it.block_header != null || !it.blockId.isNullOrBlank() }
-                .map { it.toDomain(hashFallback = numberOrHash) }
+                .awaitBody<TronTransactionListResponse>()
+
+            response.data.forEach { emit(it.toDomain()) }
+        } catch (e: Exception) {
         }
     }
 
-    override fun getLatestBlock(): Mono<Block> {
-        return webClient.post()
-            .uri("/wallet/getnowblock")
-            .bodyValue(mapOf("visible" to true))
-            .retrieve()
-            .bodyToMono<TronBlockResponse>()
-            .filter { it.block_header != null || !it.blockId.isNullOrBlank() }
-            .map { it.toDomain() }
+    override suspend fun getAddressBalance(address: String): BigDecimal {
+        return try {
+            val response = webClient.get()
+                .uri("/v1/accounts/$address")
+                .retrieve()
+                .awaitBody<TronAccountResponse>()
+
+            val sun = response.data.firstOrNull()?.balance ?: 0L
+            sun.toBigDecimal().divide(BigDecimal("1000000"))
+        } catch (e: Exception) {
+            BigDecimal.ZERO
+        }
+    }
+
+    override suspend fun getTransactionByHash(hash: String): Transaction? {
+        return try {
+            val response = webClient.post()
+                .uri("/wallet/gettransactionbyid")
+                .bodyValue(mapOf("value" to hash))
+                .retrieve()
+                .awaitBodyOrNull<TronTransactionResponse>()
+
+            if (response?.txId?.isNotBlank() == true) response.toDomain() else null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    override suspend fun getBlock(numberOrHash: String): Block? {
+        val num = numberOrHash.toLongOrNull()
+        return try {
+            val response = if (num != null) {
+                webClient.post()
+                    .uri("/wallet/getblockbynum")
+                    .bodyValue(mapOf("num" to num, "visible" to true))
+                    .retrieve()
+                    .awaitBodyOrNull<TronBlockResponse>()
+            } else {
+                webClient.post()
+                    .uri("/wallet/getblockbyid")
+                    .bodyValue(mapOf("value" to numberOrHash, "visible" to true))
+                    .retrieve()
+                    .awaitBodyOrNull<TronBlockResponse>()
+            }
+
+            if (response != null && (response.block_header != null || !response.blockId.isNullOrBlank())) {
+                response.toDomain(hashFallback = numberOrHash)
+            } else null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    override suspend fun getLatestBlock(): Block? {
+        return try {
+            val response = webClient.post()
+                .uri("/wallet/getnowblock")
+                .bodyValue(mapOf("visible" to true))
+                .retrieve()
+                .awaitBodyOrNull<TronBlockResponse>()
+
+            if (response != null && (response.block_header != null || !response.blockId.isNullOrBlank())) {
+                response.toDomain()
+            } else null
+        } catch (e: Exception) {
+            null
+        }
     }
 }
 

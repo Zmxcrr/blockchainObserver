@@ -8,7 +8,6 @@ import com.blockchain.application.usecase.RegisterUserUseCase
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
-import reactor.core.publisher.Mono
 
 @RestController
 @RequestMapping("/api/auth")
@@ -17,14 +16,14 @@ class AuthController(
     private val loginUserUseCase: LoginUserUseCase
 ) {
     @PostMapping("/register")
-    fun register(@RequestBody request: RegisterRequest): Mono<ResponseEntity<AuthTokenResponse>> {
-        return registerUserUseCase.execute(request)
-            .map { ResponseEntity.status(HttpStatus.CREATED).body(it) }
+    suspend fun register(@RequestBody request: RegisterRequest): ResponseEntity<AuthTokenResponse> {
+        val tokenResponse = registerUserUseCase.execute(request)
+        return ResponseEntity.status(HttpStatus.CREATED).body(tokenResponse)
     }
 
     @PostMapping("/login")
-    fun login(@RequestBody request: LoginRequest): Mono<ResponseEntity<AuthTokenResponse>> {
-        return loginUserUseCase.execute(request)
-            .map { ResponseEntity.ok(it) }
+    suspend fun login(@RequestBody request: LoginRequest): ResponseEntity<AuthTokenResponse> {
+        val tokenResponse = loginUserUseCase.execute(request)
+        return ResponseEntity.ok(tokenResponse)
     }
 }

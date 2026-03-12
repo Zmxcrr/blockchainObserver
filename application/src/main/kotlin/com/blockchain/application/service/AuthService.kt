@@ -8,7 +8,6 @@ import com.blockchain.domain.entity.User
 import com.blockchain.domain.port.UserRepositoryPort
 import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.stereotype.Service
-import reactor.core.publisher.Mono
 import java.util.UUID
 
 @Service
@@ -17,7 +16,7 @@ class AuthService(
     private val passwordEncoder: PasswordEncoder,
     private val jwtPort: JwtPort
 ) {
-    fun register(request: RegisterRequest): Mono<AuthTokenResponse> {
+    suspend fun register(request: RegisterRequest): AuthTokenResponse {
         val user = User(
             id = UUID.randomUUID(),
             email = request.email,
@@ -25,33 +24,30 @@ class AuthService(
             username = request.username
         )
 
-        return userRepositoryPort.save(user)
-            .map { saved ->
-                val token = jwtPort.generateToken(saved.id.toString(), saved.email)
-                AuthTokenResponse(
-                    accessToken = token,
-                    userId = saved.id.toString(),
-                    email = saved.email
-                )
-            }
+        val saved = userRepositoryPort.save(user)
+        val token = jwtPort.generateToken(saved.id.toString(), saved.email)
+
+        return AuthTokenResponse(
+            accessToken = token,
+            userId = saved.id.toString(),
+            email = saved.email
+        )
     }
 
-    fun login(request: LoginRequest): Mono<AuthTokenResponse> {
-        return userRepositoryPort.findByEmail(request.email)
-            .switchIfEmpty(Mono.error(IllegalArgumentException("Invalid email or password")))
-            .flatMap { user ->
-                if (!passwordEncoder.matches(request.password, user.passwordHash)) {
-                    Mono.error(IllegalArgumentException("Invalid email or password"))
-                } else {
-                    val token = jwtPort.generateToken(user.id.toString(), user.email)
-                    Mono.just(
-                        AuthTokenResponse(
-                            accessToken = token,
-                            userId = user.id.toString(),
-                            email = user.email
-                        )
-                    )
-                }
-            }
+    suspend fun login(request: LoginRequest): AuthTokenResponse {
+        val user = userRepositoryPort.findByEmail(request.email)
+            ?: throw IllegalArgumentException("Invalid email or password")
+
+        if (!passwordEncoder.matches(request.password, user.passwordHash)) {
+            throw IllegalArgumentException("Invalid email or password")
+        }
+
+        val token = jwtPort.generateToken(user.id.toString(), user.email)
+
+        return AuthTokenResponse(
+            accessToken = token,
+            userId = user.id.toString(),
+            email = user.email
+        )
     }
 }

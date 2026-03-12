@@ -5,7 +5,6 @@ import org.springframework.http.ResponseEntity
 import org.springframework.security.core.annotation.AuthenticationPrincipal
 import org.springframework.security.core.userdetails.UserDetails
 import org.springframework.web.bind.annotation.*
-import reactor.core.publisher.Mono
 import java.util.UUID
 
 @RestController
@@ -14,21 +13,20 @@ class UserController(
     private val userService: UserService
 ) {
     @GetMapping("/me")
-    fun getCurrentUser(
+    suspend fun getCurrentUser(
         @AuthenticationPrincipal userDetails: UserDetails
-    ): Mono<ResponseEntity<UserProfileResponse>> {
+    ): ResponseEntity<UserProfileResponse> {
         val userId = UUID.fromString(userDetails.username)
-        return userService.getUserById(userId)
-            .map { user ->
-                ResponseEntity.ok(
-                    UserProfileResponse(
-                        id = user.id.toString(),
-                        email = user.email,
-                        username = user.username,
-                        createdAt = user.createdAt.toString()
-                    )
-                )
-            }
+        val user = userService.getUserById(userId)
+
+        return ResponseEntity.ok(
+            UserProfileResponse(
+                id = user.id.toString(),
+                email = user.email,
+                username = user.username,
+                createdAt = user.createdAt.toString()
+            )
+        )
     }
 }
 

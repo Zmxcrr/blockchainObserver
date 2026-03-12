@@ -8,8 +8,10 @@ import com.blockchain.infrastructure.db.mapper.toEntity
 import com.blockchain.infrastructure.db.repository.TransactionR2dbcRepository
 import org.springframework.r2dbc.core.DatabaseClient
 import org.springframework.stereotype.Component
-import reactor.core.publisher.Flux
-import reactor.core.publisher.Mono
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.reactor.awaitSingle
+import kotlinx.coroutines.reactor.awaitSingleOrNull
 import java.time.LocalDateTime
 import java.time.ZoneOffset
 
@@ -26,20 +28,20 @@ class TransactionRepositoryAdapter(
     private val databaseClient: DatabaseClient
 ) : TransactionRepositoryPort {
 
-    override fun save(transaction: Transaction): Mono<Transaction> =
-        transactionR2dbcRepository.save(transaction.toEntity()).map { it.toDomain() }
+    override suspend fun save(transaction: Transaction): Transaction =
+        transactionR2dbcRepository.save(transaction.toEntity()).toDomain()
 
-    override fun findByHash(hash: String, network: Network): Mono<Transaction> =
-        transactionR2dbcRepository.findByHashAndNetwork(hash, network.name).map { it.toDomain() }
+    override suspend fun findByHash(hash: String, network: Network): Transaction? =
+        transactionR2dbcRepository.findByHashAndNetwork(hash, network.name)?.toDomain()
 
-    override fun findByAddress(address: String, network: Network, page: Int, size: Int): Flux<Transaction> {
+    override fun findByAddress(address: String, network: Network, page: Int, size: Int): Flow<Transaction> {
         val offset = page * size
         return transactionR2dbcRepository.findByAddressAndNetwork(address, network.name, size, offset)
             .map { it.toDomain() }
     }
 
-    override fun findExistingHashes(hashes: List<String>, network: Network): Mono<Set<String>> {
-        if (hashes.isEmpty()) return Mono.just(emptySet())
+    override suspend fun findExistingHashes(hashes: List<String>, network: Network): Set<String> {
+        if (hashes.isEmpty()) return emptySet()
 
         return databaseClient.sql(
             "SELECT hash FROM transactions WHERE network = $1 AND hash = ANY($2)"
@@ -49,11 +51,13 @@ class TransactionRepositoryAdapter(
             .map { row, _ -> row.get("hash", String::class.java)!! }
             .all()
             .collectList()
-            .map { it.toSet() }
+            .awaitSingle()
+            .toSet()
     }
 
-    override fun saveAllIgnoreConflicts(transactions: List<Transaction>): Mono<Void> {
-        if (transactions.isEmpty()) return Mono.empty()
+    override suspend fun saveAllIgnoreConflicts(transactions: List<Transaction>) {
+        if (transactions.isEmpty()) return
+
         val sql = """
             INSERT INTO transactions (amount, block_hash, block_number, contract_address, fee,
                 from_address, hash, network, status, timestamp, to_address)
@@ -62,26 +66,26 @@ class TransactionRepositoryAdapter(
             ON CONFLICT (hash, network) DO NOTHING
         """.trimIndent()
 
-        return Flux.fromIterable(transactions)
-            .concatMap { tx ->
-                val ldt = LocalDateTime.ofInstant(tx.timestamp, ZoneOffset.UTC)
-                databaseClient.sql(sql)
-                    .bind("amount", tx.amount)
-                    .bind("blockNumber", tx.blockNumber)
-                    .bind("fee", tx.fee)
-                    .bind("fromAddress", tx.fromAddress)
-                    .bind("hash", tx.hash)
-                    .bind("network", tx.network.name)
-                    .bind("status", tx.status.name)
-                    .bind("timestamp", ldt)
-                    .bindNullable("blockHash", tx.blockHash, String::class.java)
-                    .bindNullable("contractAddress", tx.contractAddress, String::class.java)
-                    .bindNullable("toAddress", tx.toAddress, String::class.java)
-                    .then()
-            }
-            .then()
+        for (tx in transactions) {
+            val ldt = LocalDateTime.ofInstant(tx.timestamp, ZoneOffset.UTC)
+            databaseClient.sql(sql)
+                .bind("amount", tx.amount)
+                .bind("blockNumber", tx.blockNumber)
+                .bind("fee", tx.fee)
+                .bind("fromAddress", tx.fromAddress)
+                .bind("hash", tx.hash)
+                .bind("network", tx.network.name)
+                .bind("status", tx.status.name)
+                .bind("timestamp", ldt)
+                .bindNullable("blockHash", tx.blockHash, String::class.java)
+                .bindNullable("contractAddress", tx.contractAddress, String::class.java)
+                .bindNullable("toAddress", tx.toAddress, String::class.java)
+                .then()
+                .awaitSingleOrNull()
+        }
     }
 
-    override fun saveAll(transactions: List<Transaction>): Flux<Transaction> =
-        transactionR2dbcRepository.saveAll(transactions.map { it.toEntity() }).map { it.toDomain() }
+    override fun saveAll(transactions: List<Transaction>): Flow<Transaction> =
+        transactionR2dbcRepository.saveAll(transactions.map { it.toEntity() })
+            .map { it.toDomain() }
 }

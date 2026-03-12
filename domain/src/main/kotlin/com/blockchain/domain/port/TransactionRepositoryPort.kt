@@ -2,16 +2,15 @@ package com.blockchain.domain.port
 
 import com.blockchain.domain.entity.Transaction
 import com.blockchain.domain.enum.Network
-import reactor.core.publisher.Flux
-import reactor.core.publisher.Mono
+import kotlinx.coroutines.flow.Flow
 
 interface TransactionRepositoryPort {
-    fun save(transaction: Transaction): Mono<Transaction>
-    fun findByHash(hash: String, network: Network): Mono<Transaction>
-    fun findByAddress(address: String, network: Network, page: Int, size: Int): Flux<Transaction>
+    suspend fun save(transaction: Transaction): Transaction
+    suspend fun findByHash(hash: String, network: Network): Transaction?
+    fun findByAddress(address: String, network: Network, page: Int, size: Int): Flow<Transaction>
 
-    fun findExistingHashes(hashes: List<String>, network: Network): Mono<Set<String>>
-    fun saveAllIgnoreConflicts(transactions: List<Transaction>): Mono<Void>
+    suspend fun findExistingHashes(hashes: List<String>, network: Network): Set<String>
+    suspend fun saveAllIgnoreConflicts(transactions: List<Transaction>)
 
-    fun saveAll(transactions: List<Transaction>): Flux<Transaction>
+    fun saveAll(transactions: List<Transaction>): Flow<Transaction>
 }

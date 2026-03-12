@@ -5,9 +5,7 @@ import com.blockchain.domain.port.UserRepositoryPort
 import com.blockchain.infrastructure.db.mapper.toDomain
 import com.blockchain.infrastructure.db.mapper.toEntity
 import com.blockchain.infrastructure.db.repository.UserR2dbcRepository
-import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Component
-import reactor.core.publisher.Mono
 import java.util.UUID
 
 @Component
@@ -15,20 +13,21 @@ class UserRepositoryAdapter(
     private val userR2dbcRepository: UserR2dbcRepository
 ) : UserRepositoryPort {
 
-    override fun save(user: User): Mono<User> {
+    override suspend fun save(user: User): User {
         val entity = user.toEntity(isNew = true)
-        return userR2dbcRepository.save(entity).map { it.toDomain() }
+        return userR2dbcRepository.save(entity).toDomain()
     }
 
-    override fun findById(id: UUID): Mono<User> =
-        userR2dbcRepository.findById(id).map { it.toDomain() }
+    override suspend fun findById(id: UUID): User? =
+        userR2dbcRepository.findById(id)?.toDomain()
 
-    override fun findByEmail(email: String): Mono<User> =
-        userR2dbcRepository.findByEmail(email).map { it.toDomain() }
+    override suspend fun findByEmail(email: String): User? =
+        userR2dbcRepository.findByEmail(email)?.toDomain()
 
-    override fun existsByEmail(email: String): Mono<Boolean> =
+    override suspend fun existsByEmail(email: String): Boolean =
         userR2dbcRepository.existsByEmail(email)
 
-    override fun deleteById(id: UUID): Mono<Void> =
+    override suspend fun deleteById(id: UUID) {
         userR2dbcRepository.deleteById(id)
+    }
 }

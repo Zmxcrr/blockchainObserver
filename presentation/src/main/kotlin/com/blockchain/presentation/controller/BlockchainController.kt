@@ -2,7 +2,6 @@ package com.blockchain.presentation.controller
 
 import com.blockchain.application.dto.AddressResponse
 import com.blockchain.application.dto.BlockResponse
-import com.blockchain.application.dto.PagedResponse
 import com.blockchain.application.dto.TransactionResponse
 import com.blockchain.application.service.BlockchainService
 import com.blockchain.application.usecase.GetAddressTransactionsUseCase
@@ -11,8 +10,7 @@ import org.springframework.http.ResponseEntity
 import org.springframework.security.core.annotation.AuthenticationPrincipal
 import org.springframework.security.core.userdetails.UserDetails
 import org.springframework.web.bind.annotation.*
-import reactor.core.publisher.Flux
-import reactor.core.publisher.Mono
+import kotlinx.coroutines.flow.Flow
 import java.util.UUID
 
 @RestController
@@ -23,16 +21,16 @@ class BlockchainController(
 ) {
 
     @GetMapping("/{network}/address/{address}")
-    fun getAddress(
+    suspend fun getAddress(
         @AuthenticationPrincipal userDetails: UserDetails?,
         @PathVariable network: Network,
         @PathVariable address: String,
         @RequestParam(defaultValue = "0") page: Int,
         @RequestParam(defaultValue = "20") size: Int
-    ): Mono<ResponseEntity<AddressResponse>> {
+    ): ResponseEntity<AddressResponse> {
         val userId = userDetails?.let { UUID.fromString(it.username) }
-        return blockchainService.getAddress(userId, address, network, page, size)
-            .map { ResponseEntity.ok(it) }
+        val response = blockchainService.getAddress(userId, address, network, page, size)
+        return ResponseEntity.ok(response)
     }
 
     @GetMapping(
@@ -45,40 +43,40 @@ class BlockchainController(
         @RequestParam(defaultValue = "0") page: Int,
         @RequestParam(defaultValue = "20") size: Int,
         @AuthenticationPrincipal userDetails: UserDetails?
-    ): Flux<TransactionResponse> {
+    ): Flow<TransactionResponse> {
         val userId = userDetails?.username?.let { UUID.fromString(it) }
         return getAddressTransactionsUseCase.execute(userId, address, network, page, size)
     }
 
     @GetMapping("/{network}/tx/{hash}")
-    fun getTransaction(
+    suspend fun getTransaction(
         @AuthenticationPrincipal userDetails: UserDetails?,
         @PathVariable network: Network,
         @PathVariable hash: String
-    ): Mono<ResponseEntity<TransactionResponse>> {
+    ): ResponseEntity<TransactionResponse> {
         val userId = userDetails?.let { UUID.fromString(it.username) }
-        return blockchainService.getTransactionByHash(hash, network, userId)
-            .map { ResponseEntity.ok(it) }
+        val response = blockchainService.getTransactionByHash(hash, network, userId)
+        return ResponseEntity.ok(response)
     }
 
     @GetMapping("/{network}/block/{numberOrHash}")
-    fun getBlock(
+    suspend fun getBlock(
         @AuthenticationPrincipal userDetails: UserDetails?,
         @PathVariable network: Network,
         @PathVariable numberOrHash: String
-    ): Mono<ResponseEntity<BlockResponse>> {
+    ): ResponseEntity<BlockResponse> {
         val userId = userDetails?.let { UUID.fromString(it.username) }
-        return blockchainService.getBlock(numberOrHash, network, userId)
-            .map { ResponseEntity.ok(it) }
+        val response = blockchainService.getBlock(numberOrHash, network, userId)
+        return ResponseEntity.ok(response)
     }
 
     @GetMapping("/{network}/block/latest")
-    fun getLatestBlock(
+    suspend fun getLatestBlock(
         @AuthenticationPrincipal userDetails: UserDetails?,
         @PathVariable network: Network
-    ): Mono<ResponseEntity<BlockResponse>> {
+    ): ResponseEntity<BlockResponse> {
         val userId = userDetails?.let { UUID.fromString(it.username) }
-        return blockchainService.getLatestBlock(network, userId)
-            .map { ResponseEntity.ok(it) }
+        val response = blockchainService.getLatestBlock(network, userId)
+        return ResponseEntity.ok(response)
     }
 }
