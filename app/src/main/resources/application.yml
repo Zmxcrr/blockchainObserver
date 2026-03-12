@@ -3,7 +3,7 @@ spring:
     name: blockchain-backend
 
   r2dbc:
-    url: ${R2DBC_URL:r2dbc:postgresql://localhost:5432/blockchain_db}
+    url: ${R2DBC_URL:r2dbc:pool:postgresql://localhost:5432/blockchain_db}
     username: ${DB_USER:postgres}
     password: ${DB_PASSWORD:postgres}
 
